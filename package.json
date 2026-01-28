@@ -3,26 +3,14 @@
   "version": "0.2.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3000",
-    "dev:log": "if exist scripts\\run-dev.ps1 (powershell -ExecutionPolicy Bypass -File scripts/run-dev.ps1) else (next dev -p 3000 > dev.log 2>&1)",
-    "build": "next build && if exist .next\\static (xcopy /E /I /Y .next\\static .next\\standalone\\.next\\static >nul) && if exist public (xcopy /E /I /Y public .next\\standalone\\public >nul)",
-    "build:log": "if exist scripts\\build.ps1 (powershell -ExecutionPolicy Bypass -File scripts/build.ps1) else (next build && if exist .next\\static (xcopy /E /I /Y .next\\static .next\\standalone\\.next\\static) && if exist public (xcopy /E /I /Y public .next\\standalone\\public))",
-    "start": "NODE_ENV=production bun .next/standalone/server.js",
-    "start:log": "if exist scripts\\run-prod.ps1 (powershell -ExecutionPolicy Bypass -File scripts/run-prod.ps1) else (set NODE_ENV=production && bun .next/standalone/server.js > server.log 2>&1)",
-    "start:win": "set NODE_ENV=production&& bun .next/standalone/server.js",
-    "start:linux": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
+    "dev": "next dev",
+    "build": "prisma generate && next build",
+    "start": "next start",
     "lint": "eslint .",
     "db:push": "prisma db push",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
-    "db:reset": "prisma migrate reset",
-    "clean": "if exist .next (rmdir /s /q .next) && if exist node_modules (rmdir /s /q node_modules)",
-    "reinstall": "npm run clean && npm install",
-    "reinstall:bun": "npm run clean && bun install",
-    "setup": "npm install && prisma generate && next build",
-    "setup:bun": "bun install && prisma generate && next build",
-    "full-dev": "npm run db:generate && npm run build && npm run start",
-    "full-dev:bun": "bun run db:generate && bun run build && bun run start"
+    "db:reset": "prisma migrate reset"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -102,10 +90,5 @@
     "tailwindcss": "^4",
     "tw-animate-css": "^1.3.5",
     "typescript": "^5"
-  },
-  "engines": {
-    "node": ">=18.17.0",
-    "bun": ">=1.0.0"
-  },
-  "packageManager": "bun@1.3.4"
+  }
 }
