@@ -117,7 +117,7 @@ export default function DashboardLayout({
     },
     {
       title: 'Kontak',
-      href: '/dashboard/contact',
+      href: '/dashboard/contacts',
       icon: Contact,
     },
     {
