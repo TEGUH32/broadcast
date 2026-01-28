@@ -117,8 +117,8 @@ export default function DashboardLayout({
     },
     {
       title: 'Kontak',
-      href: '/dashboard/contacts',
-      icon: Contacts,
+      href: '/dashboard/contact',
+      icon: Contact,
     },
     {
       title: 'Buat Broadcast',
