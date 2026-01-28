@@ -18,7 +18,7 @@ import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet'
 import { useToast } from '@/hooks/use-toast'
 import {
   LayoutDashboard,
-  Contacts,
+  Contact,
   Send,
   History,
   Settings,
