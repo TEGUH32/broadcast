@@ -10,20 +10,12 @@ import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
 import { useToast } from '@/hooks/use-toast'
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import {
   Users,
   Send,
   Clock,
   MessageSquare,
-  CheckSquare,
-  Square,
-  Search
+  Search,
+  AlertCircle
 } from 'lucide-react'
 
 interface Contact {
@@ -42,6 +34,7 @@ export default function BroadcastPage() {
   const [scheduled, setScheduled] = useState(false)
   const [scheduledDate, setScheduledDate] = useState('')
   const [scheduledTime, setScheduledTime] = useState('')
+  const [error, setError] = useState<string | null>(null)
   const { toast } = useToast()
 
   const [broadcastData, setBroadcastData] = useState({
@@ -58,12 +51,39 @@ export default function BroadcastPage() {
   const fetchContacts = async () => {
     try {
       setLoading(true)
-      const response = await fetch('/api/contacts')
-      if (response.ok) {
-        const data = await response.json()
-        setContacts(data.contacts.filter((c: Contact) => c.status === 'active'))
+      setError(null)
+      
+      // Gunakan absolute URL untuk menghindari path error
+      const baseUrl = process.env.NEXT_PUBLIC_APP_URL || window.location.origin
+      const response = await fetch(`${baseUrl}/api/contacts`, {
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      })
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
       }
-    } catch (error) {
+      
+      const data = await response.json()
+      
+      // Validasi data yang diterima
+      if (data && Array.isArray(data.contacts)) {
+        const activeContacts = data.contacts.filter((c: Contact) => 
+          c && c.status === 'active' && c.id && c.name
+        )
+        setContacts(activeContacts)
+      } else {
+        setContacts([])
+        console.warn('Invalid contacts data structure:', data)
+      }
+      
+    } catch (error: any) {
+      console.error('Error fetching contacts:', error)
+      setError('Gagal memuat kontak. Silakan coba lagi.')
+      setContacts([])
+      
       toast({
         title: 'Error',
         description: 'Gagal memuat kontak',
@@ -74,13 +94,21 @@ export default function BroadcastPage() {
     }
   }
 
-  const filteredContacts = contacts.filter(contact =>
-    contact.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    contact.phone.includes(searchQuery) ||
-    contact.email?.toLowerCase().includes(searchQuery.toLowerCase())
-  )
+  // Gunakan useMemo untuk menghindari perhitungan ulang yang tidak perlu
+  const filteredContacts = contacts.filter(contact => {
+    if (!contact || typeof contact !== 'object') return false
+    
+    const query = searchQuery.toLowerCase()
+    return (
+      contact.name?.toLowerCase().includes(query) ||
+      contact.phone?.includes(query) ||
+      contact.email?.toLowerCase().includes(query)
+    )
+  })
 
   const toggleContact = (contactId: string) => {
+    if (!contactId) return
+    
     const newSelected = new Set(selectedContacts)
     if (newSelected.has(contactId)) {
       newSelected.delete(contactId)
@@ -91,15 +119,22 @@ export default function BroadcastPage() {
   }
 
   const toggleAll = () => {
+    if (!filteredContacts.length) return
+    
     if (selectedContacts.size === filteredContacts.length) {
       setSelectedContacts(new Set())
     } else {
-      setSelectedContacts(new Set(filteredContacts.map(c => c.id)))
+      // Hanya pilih kontak yang valid
+      const validIds = filteredContacts
+        .filter(c => c && c.id)
+        .map(c => c.id)
+      setSelectedContacts(new Set(validIds))
     }
   }
 
   const handleSend = async () => {
-    if (!broadcastData.title || !broadcastData.message) {
+    // Validasi input
+    if (!broadcastData.title?.trim() || !broadcastData.message?.trim()) {
       toast({
         title: 'Error',
         description: 'Judul dan pesan broadcast harus diisi',
@@ -117,60 +152,101 @@ export default function BroadcastPage() {
       return
     }
 
-    if (scheduled && (!scheduledDate || !scheduledTime)) {
-      toast({
-        title: 'Error',
-        description: 'Tanggal dan waktu harus diisi untuk jadwal broadcast',
-        variant: 'destructive',
-      })
-      return
+    if (scheduled) {
+      const today = new Date()
+      const selectedDateTime = new Date(`${scheduledDate}T${scheduledTime}`)
+      
+      if (!scheduledDate || !scheduledTime) {
+        toast({
+          title: 'Error',
+          description: 'Tanggal dan waktu harus diisi untuk jadwal broadcast',
+          variant: 'destructive',
+        })
+        return
+      }
+      
+      if (selectedDateTime < today) {
+        toast({
+          title: 'Error',
+          description: 'Waktu jadwal tidak boleh di masa lalu',
+          variant: 'destructive',
+        })
+        return
+      }
     }
 
     try {
       setSending(true)
+      setError(null)
 
       const scheduledAt = scheduled
         ? new Date(`${scheduledDate}T${scheduledTime}`)
         : null
 
-      const response = await fetch('/api/broadcasts', {
+      // Validasi contactIds
+      const contactIds = Array.from(selectedContacts).filter(id => id)
+      
+      const payload = {
+        title: broadcastData.title.trim(),
+        message: broadcastData.message.trim(),
+        contactIds,
+        scheduledAt: scheduledAt?.toISOString()
+      }
+
+      const baseUrl = process.env.NEXT_PUBLIC_APP_URL || window.location.origin
+      const response = await fetch(`${baseUrl}/api/broadcasts`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: broadcastData.title,
-          message: broadcastData.message,
-          contactIds: Array.from(selectedContacts),
-          scheduledAt: scheduledAt?.toISOString()
-        })
+        headers: { 
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(payload)
       })
 
       const data = await response.json()
 
-      if (response.ok) {
-        // Send broadcast immediately if not scheduled
+      if (response.ok && data.broadcast) {
         if (!scheduled) {
-          const sendResponse = await fetch(`/api/broadcasts/${data.broadcast.id}/send`, {
-            method: 'POST'
-          })
-
-          const sendData = await sendResponse.json()
-
-          if (sendResponse.ok) {
-            toast({
-              title: 'Broadcast Berhasil!',
-              description: sendData.message || 'Broadcast berhasil dikirim',
+          // Kirim segera jika tidak dijadwalkan
+          try {
+            const sendResponse = await fetch(`${baseUrl}/api/broadcasts/${data.broadcast.id}/send`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              }
             })
-          } else {
+
+            const sendData = await sendResponse.json()
+
+            if (sendResponse.ok) {
+              toast({
+                title: 'Broadcast Berhasil!',
+                description: sendData.message || 'Broadcast berhasil dikirim',
+              })
+            } else {
+              toast({
+                title: 'Warning',
+                description: sendData.error || 'Broadcast dibuat tapi gagal dikirim',
+                variant: 'destructive',
+              })
+            }
+          } catch (sendError) {
+            console.error('Error sending broadcast:', sendError)
             toast({
               title: 'Warning',
-              description: 'Broadcast dibuat tapi gagal dikirim',
+              description: 'Broadcast dibuat tapi ada masalah saat pengiriman',
               variant: 'destructive',
             })
           }
         } else {
           toast({
             title: 'Broadcast Dijadwalkan!',
-            description: `Broadcast akan dikirim pada ${scheduledAt?.toLocaleDateString('id-ID')} pukul ${scheduledTime}`,
+            description: `Broadcast akan dikirim pada ${scheduledAt?.toLocaleDateString('id-ID', {
+              weekday: 'long',
+              year: 'numeric',
+              month: 'long',
+              day: 'numeric'
+            })} pukul ${scheduledTime}`,
           })
         }
 
@@ -181,22 +257,35 @@ export default function BroadcastPage() {
         setScheduledDate('')
         setScheduledTime('')
       } else {
-        toast({
-          title: 'Error',
-          description: data.error || 'Gagal membuat broadcast',
-          variant: 'destructive',
-        })
+        throw new Error(data.error || 'Gagal membuat broadcast')
       }
-    } catch (error) {
+    } catch (error: any) {
+      console.error('Broadcast error:', error)
+      setError(error.message || 'Terjadi kesalahan')
+      
       toast({
         title: 'Error',
-        description: 'Terjadi kesalahan jaringan',
+        description: error.message || 'Terjadi kesalahan jaringan',
         variant: 'destructive',
       })
     } finally {
       setSending(false)
     }
   }
+
+  // Set default waktu untuk jadwal (minimal 5 menit dari sekarang)
+  useEffect(() => {
+    if (scheduled && !scheduledDate) {
+      const tomorrow = new Date()
+      tomorrow.setDate(tomorrow.getDate() + 1)
+      setScheduledDate(tomorrow.toISOString().split('T')[0])
+      
+      // Set waktu default ke jam 9 pagi
+      if (!scheduledTime) {
+        setScheduledTime('09:00')
+      }
+    }
+  }, [scheduled, scheduledDate, scheduledTime])
 
   return (
     <div className="space-y-6">
@@ -209,6 +298,16 @@ export default function BroadcastPage() {
           Buat dan kirim pesan broadcast WhatsApp ke banyak kontak sekaligus
         </p>
       </div>
+
+      {/* Error Message */}
+      {error && (
+        <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4">
+          <div className="flex items-center gap-2 text-red-800 dark:text-red-200">
+            <AlertCircle className="w-5 h-5" />
+            <span className="font-medium">{error}</span>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Broadcast Details */}
@@ -230,6 +329,8 @@ export default function BroadcastPage() {
                 value={broadcastData.title}
                 onChange={(e) => setBroadcastData({ ...broadcastData, title: e.target.value })}
                 placeholder="Promo Spesial Hari Ini"
+                maxLength={100}
+                disabled={sending}
               />
             </div>
 
@@ -244,10 +345,13 @@ export default function BroadcastPage() {
                 onChange={(e) => setBroadcastData({ ...broadcastData, message: e.target.value })}
                 placeholder="Halo {name}, kami punya promo spesial untuk Anda..."
                 rows={6}
+                maxLength={1000}
+                disabled={sending}
               />
-              <p className="text-xs text-gray-500">
-                Gunakan {{name}} untuk menyebut nama penerima
-              </p>
+              <div className="flex justify-between text-xs text-gray-500">
+                <span>Gunakan {"{name}"} untuk menyebut nama penerima</span>
+                <span>{broadcastData.message.length}/1000</span>
+              </div>
             </div>
 
             <div className="space-y-3 pt-4 border-t">
@@ -256,6 +360,7 @@ export default function BroadcastPage() {
                   id="scheduled"
                   checked={scheduled}
                   onCheckedChange={(checked) => setScheduled(checked as boolean)}
+                  disabled={sending}
                 />
                 <Label htmlFor="scheduled" className="flex items-center gap-2 cursor-pointer">
                   <Clock className="w-4 h-4" />
@@ -273,6 +378,7 @@ export default function BroadcastPage() {
                       value={scheduledDate}
                       onChange={(e) => setScheduledDate(e.target.value)}
                       min={new Date().toISOString().split('T')[0]}
+                      disabled={sending}
                     />
                   </div>
                   <div className="space-y-2">
@@ -282,6 +388,7 @@ export default function BroadcastPage() {
                       type="time"
                       value={scheduledTime}
                       onChange={(e) => setScheduledTime(e.target.value)}
+                      disabled={sending}
                     />
                   </div>
                 </div>
@@ -291,9 +398,17 @@ export default function BroadcastPage() {
             <Button
               onClick={handleSend}
               disabled={sending}
-              className="w-full bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700"
+              className="w-full bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 disabled:opacity-50"
             >
-              {sending ? 'Memproses...' : scheduled ? 'Jadwalkan Broadcast' : 'Kirim Sekarang'}
+              {sending ? (
+                <>
+                  <span className="animate-pulse">Memproses...</span>
+                </>
+              ) : scheduled ? (
+                'Jadwalkan Broadcast'
+              ) : (
+                'Kirim Sekarang'
+              )}
               <Send className="w-4 h-4 ml-2" />
             </Button>
           </CardContent>
@@ -306,10 +421,15 @@ export default function BroadcastPage() {
               <div>
                 <CardTitle>Pilih Penerima</CardTitle>
                 <CardDescription>
-                  {selectedContacts.size} kontak dipilih
+                  {selectedContacts.size} dari {filteredContacts.length} kontak dipilih
                 </CardDescription>
               </div>
-              <Button variant="outline" size="sm" onClick={toggleAll}>
+              <Button 
+                variant="outline" 
+                size="sm" 
+                onClick={toggleAll}
+                disabled={loading || !filteredContacts.length || sending}
+              >
                 {selectedContacts.size === filteredContacts.length ? 'Batal Semua' : 'Pilih Semua'}
               </Button>
             </div>
@@ -323,51 +443,71 @@ export default function BroadcastPage() {
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   className="pl-10"
+                  disabled={loading || sending}
                 />
               </div>
 
               {loading ? (
-                <div className="text-center py-12 text-gray-500">
-                  Memuat kontak...
+                <div className="text-center py-12 space-y-4">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-600 mx-auto"></div>
+                  <p className="text-gray-500">Memuat kontak...</p>
+                </div>
+              ) : error ? (
+                <div className="text-center py-8">
+                  <AlertCircle className="w-12 h-12 text-red-400 mx-auto mb-4" />
+                  <p className="text-gray-600 dark:text-gray-400">{error}</p>
+                  <Button 
+                    variant="outline" 
+                    onClick={fetchContacts}
+                    className="mt-4"
+                  >
+                    Coba Lagi
+                  </Button>
                 </div>
               ) : filteredContacts.length === 0 ? (
                 <div className="text-center py-12">
                   <Users className="w-12 h-12 text-gray-400 mx-auto mb-4" />
                   <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">
-                    Tidak ada kontak
+                    {searchQuery ? 'Kontak tidak ditemukan' : 'Tidak ada kontak aktif'}
                   </h3>
                   <p className="text-gray-600 dark:text-gray-400">
-                    Belum ada kontak aktif untuk dipilih
+                    {searchQuery ? 'Coba dengan kata kunci lain' : 'Belum ada kontak aktif untuk dipilih'}
                   </p>
                 </div>
               ) : (
-                <div className="space-y-2 max-h-[500px] overflow-y-auto">
+                <div className="space-y-2 max-h-[500px] overflow-y-auto pr-2">
                   {filteredContacts.map((contact) => (
                     <div
                       key={contact.id}
-                      onClick={() => toggleContact(contact.id)}
+                      onClick={() => !sending && toggleContact(contact.id)}
                       className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-colors ${
                         selectedContacts.has(contact.id)
                           ? 'bg-green-50 dark:bg-green-900/20 border-2 border-green-500'
                           : 'bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700'
-                      }`}
+                      } ${sending ? 'opacity-50 cursor-not-allowed' : ''}`}
                     >
                       <Checkbox
                         checked={selectedContacts.has(contact.id)}
                         onChange={() => toggleContact(contact.id)}
+                        disabled={sending}
                       />
                       <div className="flex-1">
                         <div className="flex items-center gap-2">
-                          <h4 className="font-medium text-gray-900 dark:text-white">
+                          <h4 className="font-medium text-gray-900 dark:text-white truncate">
                             {contact.name}
                           </h4>
                           {selectedContacts.has(contact.id) && (
-                            <Badge className="bg-green-600">Dipilih</Badge>
+                            <Badge className="bg-green-600 text-xs">Dipilih</Badge>
                           )}
                         </div>
-                        <p className="text-sm text-gray-600 dark:text-gray-400">
+                        <p className="text-sm text-gray-600 dark:text-gray-400 truncate">
                           {contact.phone}
                         </p>
+                        {contact.email && (
+                          <p className="text-xs text-gray-500 truncate">
+                            {contact.email}
+                          </p>
+                        )}
                       </div>
                     </div>
                   ))}
