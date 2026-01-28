@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -14,7 +14,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from '@/components/ui/dialog'
 import {
   AlertDialog,
@@ -25,7 +24,6 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-  AlertDialogTrigger,
 } from '@/components/ui/alert-dialog'
 import { useToast } from '@/hooks/use-toast'
 import {
@@ -39,7 +37,9 @@ import {
   User,
   Download,
   Upload,
-  Filter
+  Loader2,
+  AlertCircle,
+  RefreshCw
 } from 'lucide-react'
 
 interface Contact {
@@ -51,18 +51,34 @@ interface Contact {
   status: string
   notes: string | null
   createdAt: string
+  updatedAt?: string
+}
+
+interface FormData {
+  name: string
+  phone: string
+  email: string
+  tags: string
+  notes: string
 }
 
 export default function ContactsPage() {
   const [contacts, setContacts] = useState<Contact[]>([])
   const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
-  const [statusFilter, setStatusFilter] = useState('all')
+  const [statusFilter, setStatusFilter] = useState<string>('all')
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editingContact, setEditingContact] = useState<Contact | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [initialLoad, setInitialLoad] = useState(true)
   const { toast } = useToast()
 
-  const [formData, setFormData] = useState({
+  const searchTimeoutRef = useRef<NodeJS.Timeout>()
+  const abortControllerRef = useRef<AbortController | null>(null)
+
+  const [formData, setFormData] = useState<FormData>({
     name: '',
     phone: '',
     email: '',
@@ -70,19 +86,102 @@ export default function ContactsPage() {
     notes: ''
   })
 
-  useEffect(() => {
-    fetchContacts()
-  }, [])
+  const [formErrors, setFormErrors] = useState<Record<string, string>>({})
 
-  const fetchContacts = async () => {
+  const validateForm = (): boolean => {
+    const errors: Record<string, string> = {}
+
+    // Validasi nama
+    if (!formData.name.trim()) {
+      errors.name = 'Nama harus diisi'
+    } else if (formData.name.trim().length < 2) {
+      errors.name = 'Nama minimal 2 karakter'
+    }
+
+    // Validasi nomor telepon
+    if (!formData.phone.trim()) {
+      errors.phone = 'Nomor telepon harus diisi'
+    } else {
+      // Hapus semua karakter non-digit kecuali +
+      const cleanPhone = formData.phone.replace(/[^\d+]/g, '')
+      
+      // Cek apakah diawali dengan 62 atau +62 atau 0
+      if (!cleanPhone.match(/^(62|\+62|0)\d+$/)) {
+        errors.phone = 'Format nomor telepon tidak valid. Gunakan format: 628xxx atau 08xxx'
+      } else if (cleanPhone.replace(/^(\+62|62|0)/, '').length < 9) {
+        errors.phone = 'Nomor telepon terlalu pendek'
+      }
+    }
+
+    // Validasi email (opsional)
+    if (formData.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
+      errors.email = 'Format email tidak valid'
+    }
+
+    setFormErrors(errors)
+    return Object.keys(errors).length === 0
+  }
+
+  const fetchContacts = useCallback(async (signal?: AbortSignal) => {
     try {
       setLoading(true)
-      const response = await fetch(`/api/contacts?search=${searchQuery}&status=${statusFilter}`)
-      if (response.ok) {
-        const data = await response.json()
-        setContacts(data.contacts)
+      setError(null)
+
+      // Batalkan request sebelumnya jika ada
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
       }
-    } catch (error) {
+
+      // Buat controller baru
+      abortControllerRef.current = new AbortController()
+      const controller = abortControllerRef.current
+
+      const params = new URLSearchParams()
+      if (searchQuery) params.append('search', searchQuery)
+      if (statusFilter !== 'all') params.append('status', statusFilter)
+
+      const baseUrl = process.env.NEXT_PUBLIC_APP_URL || window.location.origin
+      const url = `${baseUrl}/api/contacts${params.toString() ? `?${params.toString()}` : ''}`
+
+      const response = await fetch(url, {
+        signal: signal || controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache'
+        }
+      })
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`)
+      }
+
+      const data = await response.json()
+
+      // Validasi data
+      if (data && Array.isArray(data.contacts)) {
+        const validContacts = data.contacts.filter((contact: any): contact is Contact => 
+          contact && 
+          typeof contact === 'object' &&
+          typeof contact.id === 'string' &&
+          typeof contact.name === 'string' &&
+          typeof contact.phone === 'string'
+        )
+        setContacts(validContacts)
+      } else {
+        setContacts([])
+        console.warn('Invalid data structure from API:', data)
+      }
+
+    } catch (error: any) {
+      if (error.name === 'AbortError') {
+        console.log('Fetch aborted')
+        return
+      }
+      
+      console.error('Error fetching contacts:', error)
+      setError('Gagal memuat kontak. Silakan coba lagi.')
+      setContacts([])
+      
       toast({
         title: 'Error',
         description: 'Gagal memuat kontak',
@@ -90,29 +189,92 @@ export default function ContactsPage() {
       })
     } finally {
       setLoading(false)
+      setInitialLoad(false)
     }
-  }
+  }, [searchQuery, statusFilter, toast])
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      fetchContacts()
-    }, 500)
+    fetchContacts()
 
-    return () => clearTimeout(timer)
-  }, [searchQuery, statusFilter])
+    // Cleanup function
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort()
+      }
+      if (searchTimeoutRef.current) {
+        clearTimeout(searchTimeoutRef.current)
+      }
+    }
+  }, [fetchContacts])
+
+  // Debounce search
+  useEffect(() => {
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current)
+    }
+
+    if (!initialLoad) {
+      searchTimeoutRef.current = setTimeout(() => {
+        fetchContacts()
+      }, 500)
+    }
+
+    return () => {
+      if (searchTimeoutRef.current) {
+        clearTimeout(searchTimeoutRef.current)
+      }
+    }
+  }, [searchQuery, statusFilter, fetchContacts, initialLoad])
 
   const handleSave = async () => {
+    if (!validateForm()) {
+      toast({
+        title: 'Validasi Gagal',
+        description: 'Harap periksa form yang diisi',
+        variant: 'destructive',
+      })
+      return
+    }
+
     try {
+      setSaving(true)
+      setError(null)
+
+      // Format nomor telepon
+      let formattedPhone = formData.phone.trim()
+      // Hapus semua non-digit kecuali +
+      formattedPhone = formattedPhone.replace(/[^\d+]/g, '')
+      // Konversi ke format 62
+      if (formattedPhone.startsWith('0')) {
+        formattedPhone = '62' + formattedPhone.substring(1)
+      } else if (formattedPhone.startsWith('+62')) {
+        formattedPhone = formattedPhone.substring(1)
+      } else if (!formattedPhone.startsWith('62')) {
+        formattedPhone = '62' + formattedPhone
+      }
+
+      const payload = {
+        name: formData.name.trim(),
+        phone: formattedPhone,
+        email: formData.email.trim() || null,
+        tags: formData.tags.trim() || null,
+        notes: formData.notes.trim() || null
+      }
+
+      const baseUrl = process.env.NEXT_PUBLIC_APP_URL || window.location.origin
       const url = editingContact
-        ? `/api/contacts/${editingContact.id}`
-        : '/api/contacts'
+        ? `${baseUrl}/api/contacts/${editingContact.id}`
+        : `${baseUrl}/api/contacts`
 
       const method = editingContact ? 'PUT' : 'POST'
 
       const response = await fetch(url, {
         method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(formData)
+        headers: { 
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(payload)
       })
 
       const data = await response.json()
@@ -122,64 +284,90 @@ export default function ContactsPage() {
           title: editingContact ? 'Kontak Diperbarui' : 'Kontak Ditambahkan',
           description: editingContact ? 'Kontak berhasil diperbarui' : 'Kontak baru berhasil ditambahkan',
         })
-        setDialogOpen(false)
-        setEditingContact(null)
-        resetForm()
+        
+        handleDialogClose()
         fetchContacts()
       } else {
-        toast({
-          title: 'Error',
-          description: data.error || 'Terjadi kesalahan',
-          variant: 'destructive',
-        })
+        throw new Error(data.error || data.message || 'Terjadi kesalahan')
       }
-    } catch (error) {
+    } catch (error: any) {
+      console.error('Save error:', error)
+      setError(error.message || 'Terjadi kesalahan jaringan')
+      
       toast({
         title: 'Error',
-        description: 'Terjadi kesalahan jaringan',
+        description: error.message || 'Terjadi kesalahan',
         variant: 'destructive',
       })
+    } finally {
+      setSaving(false)
     }
   }
 
   const handleDelete = async (id: string) => {
     try {
-      const response = await fetch(`/api/contacts/${id}`, {
-        method: 'DELETE'
+      setDeletingId(id)
+      setError(null)
+
+      const baseUrl = process.env.NEXT_PUBLIC_APP_URL || window.location.origin
+      const response = await fetch(`${baseUrl}/api/contacts/${id}`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json'
+        }
       })
 
-      if (response.ok) {
-        toast({
-          title: 'Kontak Dihapus',
-          description: 'Kontak berhasil dihapus',
-        })
-        fetchContacts()
-      } else {
-        toast({
-          title: 'Error',
-          description: 'Gagal menghapus kontak',
-          variant: 'destructive',
-        })
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(data.error || data.message || 'Gagal menghapus kontak')
       }
-    } catch (error) {
+
+      toast({
+        title: 'Kontak Dihapus',
+        description: 'Kontak berhasil dihapus',
+      })
+      
+      fetchContacts()
+    } catch (error: any) {
+      console.error('Delete error:', error)
+      setError(error.message || 'Terjadi kesalahan')
+      
       toast({
         title: 'Error',
-        description: 'Terjadi kesalahan jaringan',
+        description: error.message || 'Gagal menghapus kontak',
         variant: 'destructive',
       })
+    } finally {
+      setDeletingId(null)
     }
   }
 
   const openEditDialog = (contact: Contact) => {
     setEditingContact(contact)
     setFormData({
-      name: contact.name,
-      phone: contact.phone,
+      name: contact.name || '',
+      phone: contact.phone || '',
       email: contact.email || '',
       tags: contact.tags || '',
       notes: contact.notes || ''
     })
+    setFormErrors({})
     setDialogOpen(true)
+  }
+
+  const handleDialogOpenChange = (open: boolean) => {
+    if (!open) {
+      handleDialogClose()
+    }
+  }
+
+  const handleDialogClose = () => {
+    setDialogOpen(false)
+    setTimeout(() => {
+      setEditingContact(null)
+      resetForm()
+      setFormErrors({})
+    }, 300)
   }
 
   const resetForm = () => {
@@ -192,22 +380,56 @@ export default function ContactsPage() {
     })
   }
 
-  const handleDialogClose = () => {
-    setDialogOpen(false)
-    setEditingContact(null)
-    resetForm()
-  }
-
   const filteredContacts = contacts.filter(contact => {
+    if (!contact || typeof contact !== 'object') return false
+    
+    const query = searchQuery.toLowerCase()
     const matchesSearch =
-      contact.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      contact.phone.includes(searchQuery) ||
-      contact.email?.toLowerCase().includes(searchQuery.toLowerCase())
+      contact.name?.toLowerCase().includes(query) ||
+      contact.phone?.includes(query) ||
+      contact.email?.toLowerCase().includes(query) ||
+      contact.tags?.toLowerCase().includes(query)
 
     const matchesStatus = statusFilter === 'all' || contact.status === statusFilter
 
     return matchesSearch && matchesStatus
   })
+
+  const formatPhoneNumber = (phone: string) => {
+    if (!phone) return ''
+    // Format: 62-812-3456-7890
+    const clean = phone.replace(/\D/g, '')
+    if (clean.startsWith('62')) {
+      return clean.replace(/(\d{2})(\d{3})(\d{4})(\d{4})/, '$1-$2-$3-$4')
+    }
+    return phone
+  }
+
+  const formatDate = (dateString: string) => {
+    try {
+      return new Date(dateString).toLocaleDateString('id-ID', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric'
+      })
+    } catch {
+      return dateString
+    }
+  }
+
+  const handleImport = () => {
+    toast({
+      title: 'Coming Soon',
+      description: 'Fitur import akan segera tersedia',
+    })
+  }
+
+  const handleExport = () => {
+    toast({
+      title: 'Coming Soon',
+      description: 'Fitur export akan segera tersedia',
+    })
+  }
 
   return (
     <div className="space-y-6">
@@ -222,21 +444,33 @@ export default function ContactsPage() {
           </p>
         </div>
         <div className="flex gap-3">
-          <Button variant="outline" size="sm">
+          <Button 
+            variant="outline" 
+            size="sm"
+            onClick={handleImport}
+            disabled={loading}
+          >
             <Upload className="w-4 h-4 mr-2" />
             Import
           </Button>
-          <Button variant="outline" size="sm">
+          <Button 
+            variant="outline" 
+            size="sm"
+            onClick={handleExport}
+            disabled={loading || contacts.length === 0}
+          >
             <Download className="w-4 h-4 mr-2" />
             Export
           </Button>
-          <Dialog open={dialogOpen} onOpenChange={handleDialogClose}>
-            <DialogTrigger asChild>
-              <Button className="bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700">
-                <Plus className="w-4 h-4 mr-2" />
-                Tambah Kontak
-              </Button>
-            </DialogTrigger>
+          <Dialog open={dialogOpen} onOpenChange={handleDialogOpenChange}>
+            <Button 
+              className="bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700"
+              onClick={() => setDialogOpen(true)}
+              disabled={loading}
+            >
+              <Plus className="w-4 h-4 mr-2" />
+              Tambah Kontak
+            </Button>
             <DialogContent className="sm:max-w-[500px]">
               <DialogHeader>
                 <DialogTitle>
@@ -246,47 +480,88 @@ export default function ContactsPage() {
                   {editingContact ? 'Edit informasi kontak' : 'Isi informasi kontak baru'}
                 </DialogDescription>
               </DialogHeader>
+              
+              {/* Error Display */}
+              {error && (
+                <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3">
+                  <div className="flex items-center gap-2 text-red-800 dark:text-red-200">
+                    <AlertCircle className="w-4 h-4" />
+                    <span className="text-sm">{error}</span>
+                  </div>
+                </div>
+              )}
+
               <div className="space-y-4 py-4">
                 <div className="space-y-2">
-                  <Label htmlFor="name">
-                    <User className="w-4 h-4 inline mr-2" />
+                  <Label htmlFor="name" className="flex items-center gap-2">
+                    <User className="w-4 h-4" />
                     Nama *
                   </Label>
                   <Input
                     id="name"
                     value={formData.name}
-                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                    onChange={(e) => {
+                      setFormData({ ...formData, name: e.target.value })
+                      if (formErrors.name) setFormErrors({ ...formErrors, name: '' })
+                    }}
                     placeholder="John Doe"
+                    disabled={saving}
+                    className={formErrors.name ? 'border-red-500' : ''}
                   />
+                  {formErrors.name && (
+                    <p className="text-xs text-red-500">{formErrors.name}</p>
+                  )}
                 </div>
+
                 <div className="space-y-2">
-                  <Label htmlFor="phone">
-                    <Phone className="w-4 h-4 inline mr-2" />
+                  <Label htmlFor="phone" className="flex items-center gap-2">
+                    <Phone className="w-4 h-4" />
                     No. WhatsApp *
                   </Label>
                   <Input
                     id="phone"
                     value={formData.phone}
-                    onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
+                    onChange={(e) => {
+                      setFormData({ ...formData, phone: e.target.value })
+                      if (formErrors.phone) setFormErrors({ ...formErrors, phone: '' })
+                    }}
                     placeholder="628123456789"
+                    disabled={saving}
+                    className={formErrors.phone ? 'border-red-500' : ''}
                   />
+                  {formErrors.phone && (
+                    <p className="text-xs text-red-500">{formErrors.phone}</p>
+                  )}
+                  <p className="text-xs text-gray-500">
+                    Contoh: 628123456789 atau 08123456789
+                  </p>
                 </div>
+
                 <div className="space-y-2">
-                  <Label htmlFor="email">
-                    <Mail className="w-4 h-4 inline mr-2" />
+                  <Label htmlFor="email" className="flex items-center gap-2">
+                    <Mail className="w-4 h-4" />
                     Email
                   </Label>
                   <Input
                     id="email"
                     type="email"
                     value={formData.email}
-                    onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+                    onChange={(e) => {
+                      setFormData({ ...formData, email: e.target.value })
+                      if (formErrors.email) setFormErrors({ ...formErrors, email: '' })
+                    }}
                     placeholder="john@email.com"
+                    disabled={saving}
+                    className={formErrors.email ? 'border-red-500' : ''}
                   />
+                  {formErrors.email && (
+                    <p className="text-xs text-red-500">{formErrors.email}</p>
+                  )}
                 </div>
+
                 <div className="space-y-2">
-                  <Label htmlFor="tags">
-                    <Tag className="w-4 h-4 inline mr-2" />
+                  <Label htmlFor="tags" className="flex items-center gap-2">
+                    <Tag className="w-4 h-4" />
                     Tags (pisahkan dengan koma)
                   </Label>
                   <Input
@@ -294,8 +569,10 @@ export default function ContactsPage() {
                     value={formData.tags}
                     onChange={(e) => setFormData({ ...formData, tags: e.target.value })}
                     placeholder="vip, customer, lead"
+                    disabled={saving}
                   />
                 </div>
+
                 <div className="space-y-2">
                   <Label htmlFor="notes">Catatan</Label>
                   <Textarea
@@ -304,25 +581,60 @@ export default function ContactsPage() {
                     onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
                     placeholder="Catatan tambahan..."
                     rows={3}
+                    disabled={saving}
                   />
                 </div>
               </div>
+
               <DialogFooter>
-                <Button variant="outline" onClick={handleDialogClose}>
+                <Button 
+                  variant="outline" 
+                  onClick={handleDialogClose}
+                  disabled={saving}
+                >
                   Batal
                 </Button>
                 <Button
                   className="bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700"
                   onClick={handleSave}
-                  disabled={!formData.name || !formData.phone}
+                  disabled={saving || !formData.name || !formData.phone}
                 >
-                  {editingContact ? 'Simpan Perubahan' : 'Tambah Kontak'}
+                  {saving ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      Menyimpan...
+                    </>
+                  ) : editingContact ? (
+                    'Simpan Perubahan'
+                  ) : (
+                    'Tambah Kontak'
+                  )}
                 </Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
         </div>
       </div>
+
+      {/* Error Alert */}
+      {error && !loading && (
+        <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-red-800 dark:text-red-200">
+              <AlertCircle className="w-5 h-5" />
+              <span>{error}</span>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => fetchContacts()}
+              className="text-red-600 hover:text-red-700 hover:bg-red-100"
+            >
+              <RefreshCw className="w-4 h-4" />
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* Search and Filter */}
       <Card>
@@ -331,10 +643,11 @@ export default function ContactsPage() {
             <div className="flex-1 relative">
               <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
               <Input
-                placeholder="Cari nama, nomor telepon, atau email..."
+                placeholder="Cari nama, nomor telepon, email, atau tags..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="pl-10"
+                disabled={loading}
               />
             </div>
             <div className="flex gap-2">
@@ -342,6 +655,7 @@ export default function ContactsPage() {
                 variant={statusFilter === 'all' ? 'default' : 'outline'}
                 onClick={() => setStatusFilter('all')}
                 size="sm"
+                disabled={loading}
               >
                 Semua
               </Button>
@@ -349,6 +663,7 @@ export default function ContactsPage() {
                 variant={statusFilter === 'active' ? 'default' : 'outline'}
                 onClick={() => setStatusFilter('active')}
                 size="sm"
+                disabled={loading}
               >
                 Aktif
               </Button>
@@ -356,6 +671,7 @@ export default function ContactsPage() {
                 variant={statusFilter === 'inactive' ? 'default' : 'outline'}
                 onClick={() => setStatusFilter('inactive')}
                 size="sm"
+                disabled={loading}
               >
                 Non-Aktif
               </Button>
@@ -366,13 +682,34 @@ export default function ContactsPage() {
 
       {/* Contacts List */}
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle>Daftar Kontak ({filteredContacts.length})</CardTitle>
+          {loading && (
+            <Loader2 className="w-4 h-4 animate-spin text-gray-500" />
+          )}
         </CardHeader>
         <CardContent>
-          {loading ? (
-            <div className="text-center py-12 text-gray-500">
-              Memuat kontak...
+          {loading && initialLoad ? (
+            <div className="text-center py-12 space-y-4">
+              <Loader2 className="w-8 h-8 animate-spin text-gray-400 mx-auto" />
+              <p className="text-gray-500">Memuat kontak...</p>
+            </div>
+          ) : error ? (
+            <div className="text-center py-12">
+              <AlertCircle className="w-12 h-12 text-red-400 mx-auto mb-4" />
+              <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">
+                Gagal memuat kontak
+              </h3>
+              <p className="text-gray-600 dark:text-gray-400 mb-4">
+                {error}
+              </p>
+              <Button
+                variant="outline"
+                onClick={() => fetchContacts()}
+              >
+                <RefreshCw className="w-4 h-4 mr-2" />
+                Coba Lagi
+              </Button>
             </div>
           ) : filteredContacts.length === 0 ? (
             <div className="text-center py-12">
@@ -385,42 +722,56 @@ export default function ContactsPage() {
                   ? 'Coba ubah pencarian atau filter'
                   : 'Mulai tambahkan kontak pertama Anda'}
               </p>
+              {!searchQuery && statusFilter === 'all' && (
+                <Button
+                  className="bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700"
+                  onClick={() => setDialogOpen(true)}
+                >
+                  <Plus className="w-4 h-4 mr-2" />
+                  Tambah Kontak Pertama
+                </Button>
+              )}
             </div>
           ) : (
-            <div className="space-y-3 max-h-[600px] overflow-y-auto">
+            <div className="space-y-3 max-h-[600px] overflow-y-auto pr-2">
               {filteredContacts.map((contact) => (
                 <div
                   key={contact.id}
-                  className="flex items-start justify-between p-4 bg-gray-50 dark:bg-gray-800 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                  className="flex items-start justify-between p-4 bg-gray-50 dark:bg-gray-800 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors group"
                 >
-                  <div className="flex-1">
-                    <div className="flex items-center gap-3 mb-2">
-                      <h4 className="font-semibold text-gray-900 dark:text-white">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-3 mb-2 flex-wrap">
+                      <h4 className="font-semibold text-gray-900 dark:text-white truncate">
                         {contact.name}
                       </h4>
                       <Badge
                         variant={contact.status === 'active' ? 'default' : 'secondary'}
+                        className="shrink-0"
                       >
                         {contact.status === 'active' ? 'Aktif' : 'Non-Aktif'}
                       </Badge>
                     </div>
                     <div className="space-y-1 text-sm text-gray-600 dark:text-gray-400">
                       <div className="flex items-center gap-2">
-                        <Phone className="w-3 h-3" />
-                        <span>{contact.phone}</span>
+                        <Phone className="w-3 h-3 shrink-0" />
+                        <span className="truncate">{formatPhoneNumber(contact.phone)}</span>
                       </div>
                       {contact.email && (
                         <div className="flex items-center gap-2">
-                          <Mail className="w-3 h-3" />
-                          <span>{contact.email}</span>
+                          <Mail className="w-3 h-3 shrink-0" />
+                          <span className="truncate">{contact.email}</span>
                         </div>
                       )}
                       {contact.tags && (
                         <div className="flex items-center gap-2">
-                          <Tag className="w-3 h-3" />
-                          <div className="flex gap-1">
+                          <Tag className="w-3 h-3 shrink-0" />
+                          <div className="flex gap-1 flex-wrap">
                             {contact.tags.split(',').map((tag, index) => (
-                              <Badge key={index} variant="outline" className="text-xs">
+                              <Badge 
+                                key={index} 
+                                variant="outline" 
+                                className="text-xs truncate max-w-[100px]"
+                              >
                                 {tag.trim()}
                               </Badge>
                             ))}
@@ -428,40 +779,64 @@ export default function ContactsPage() {
                         </div>
                       )}
                       {contact.notes && (
-                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-2 line-clamp-2">
                           {contact.notes}
                         </p>
                       )}
+                      <p className="text-xs text-gray-400 mt-2">
+                        Ditambahkan: {formatDate(contact.createdAt)}
+                      </p>
                     </div>
                   </div>
-                  <div className="flex gap-2 ml-4">
+                  <div className="flex gap-2 ml-4 opacity-0 group-hover:opacity-100 transition-opacity">
                     <Button
                       variant="ghost"
                       size="icon"
                       onClick={() => openEditDialog(contact)}
+                      disabled={loading}
                     >
                       <Edit className="w-4 h-4" />
                     </Button>
                     <AlertDialog>
                       <AlertDialogTrigger asChild>
-                        <Button variant="ghost" size="icon">
-                          <Trash2 className="w-4 h-4 text-red-600" />
+                        <Button 
+                          variant="ghost" 
+                          size="icon"
+                          disabled={loading || deletingId === contact.id}
+                        >
+                          {deletingId === contact.id ? (
+                            <Loader2 className="w-4 h-4 animate-spin text-red-600" />
+                          ) : (
+                            <Trash2 className="w-4 h-4 text-red-600" />
+                          )}
                         </Button>
                       </AlertDialogTrigger>
                       <AlertDialogContent>
                         <AlertDialogHeader>
                           <AlertDialogTitle>Hapus Kontak?</AlertDialogTitle>
                           <AlertDialogDescription>
-                            Apakah Anda yakin ingin menghapus kontak {contact.name}? Tindakan ini tidak dapat dibatalkan.
+                            Apakah Anda yakin ingin menghapus kontak <strong>{contact.name}</strong>?
+                            <br />
+                            <span className="text-red-600">Tindakan ini tidak dapat dibatalkan.</span>
                           </AlertDialogDescription>
                         </AlertDialogHeader>
                         <AlertDialogFooter>
-                          <AlertDialogCancel>Batal</AlertDialogCancel>
+                          <AlertDialogCancel disabled={deletingId === contact.id}>
+                            Batal
+                          </AlertDialogCancel>
                           <AlertDialogAction
                             onClick={() => handleDelete(contact.id)}
+                            disabled={deletingId === contact.id}
                             className="bg-red-600 hover:bg-red-700"
                           >
-                            Hapus
+                            {deletingId === contact.id ? (
+                              <>
+                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                Menghapus...
+                              </>
+                            ) : (
+                              'Hapus'
+                            )}
                           </AlertDialogAction>
                         </AlertDialogFooter>
                       </AlertDialogContent>
