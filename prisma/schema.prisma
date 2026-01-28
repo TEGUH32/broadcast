@@ -1,0 +1,111 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                String   @id @default(cuid())
+  email             String   @unique
+  name              String
+  password          String
+  phone             String?
+  avatar            String?
+  companyName       String?
+  isActive          Boolean  @default(true)
+  whatsappNumber    String?
+  whatsappApiKey    String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  contacts          Contact[]
+  broadcasts        Broadcast[]
+  templates         MessageTemplate[]
+}
+
+model Contact {
+  id            String   @id @default(cuid())
+  name          String
+  phone         String
+  email         String?
+  tags          String?
+  status        String   @default("active") // active, inactive, blocked
+  notes         String?
+  userId        String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  broadcasts    BroadcastRecipient[]
+
+  @@index([userId])
+  @@index([phone])
+}
+
+model MessageTemplate {
+  id            String   @id @default(cuid())
+  name          String
+  content       String
+  variables     String?  // JSON string of variable names
+  isActive      Boolean  @default(true)
+  userId        String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  broadcasts    Broadcast[]
+
+  @@index([userId])
+}
+
+model Broadcast {
+  id            String   @id @default(cuid())
+  title         String
+  message       String
+  templateId    String?
+  status        String   @default("draft") // draft, sending, completed, failed, paused
+  scheduledAt   DateTime?
+  sentAt        DateTime?
+  completedAt   DateTime?
+  totalContacts Int      @default(0)
+  sentCount     Int      @default(0)
+  failedCount   Int      @default(0)
+  pendingCount  Int      @default(0)
+  userId        String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  user          User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  template      MessageTemplate?        @relation(fields: [templateId], references: [id])
+  recipients    BroadcastRecipient[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([scheduledAt])
+}
+
+model BroadcastRecipient {
+  id            String   @id @default(cuid())
+  broadcastId   String
+  contactId     String
+  status        String   @default("pending") // pending, sent, failed, delivered, read
+  errorMessage  String?
+  sentAt        DateTime?
+  deliveredAt   DateTime?
+  readAt        DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  broadcast     Broadcast @relation(fields: [broadcastId], references: [id], onDelete: Cascade)
+  contact       Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@index([broadcastId])
+  @@index([contactId])
+  @@index([status])
+}
