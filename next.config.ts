@@ -1,13 +1,10 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* output: "standalone" <-- Baris ini sudah hilang/dihapus */
+  // HAPUS bagian eslint dari sini
   
   typescript: {
-    ignoreBuildErrors: true,
-  },
-  eslint: {
-    ignoreDuringBuilds: true,
+    ignoreBuildErrors: true, 
   },
   reactStrictMode: false,
 };
