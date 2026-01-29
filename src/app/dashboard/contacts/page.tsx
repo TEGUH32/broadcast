@@ -39,7 +39,8 @@ import {
   Upload,
   Loader2,
   AlertCircle,
-  RefreshCw
+  RefreshCw,
+  Users
 } from 'lucide-react'
 
 interface Contact {
@@ -60,6 +61,12 @@ interface FormData {
   email: string
   tags: string
   notes: string
+}
+
+interface ApiResponse {
+  contacts: Contact[]
+  error?: string
+  message?: string
 }
 
 export default function ContactsPage() {
@@ -87,6 +94,12 @@ export default function ContactsPage() {
   })
 
   const [formErrors, setFormErrors] = useState<Record<string, string>>({})
+
+  // Debug: Log environment variable
+  useEffect(() => {
+    console.log('NEXT_PUBLIC_APP_URL:', process.env.NEXT_PUBLIC_APP_URL)
+    console.log('Window location origin:', typeof window !== 'undefined' ? window.location.origin : 'undefined')
+  }, [])
 
   const validateForm = (): boolean => {
     const errors: Record<string, string> = {}
@@ -140,22 +153,48 @@ export default function ContactsPage() {
       if (searchQuery) params.append('search', searchQuery)
       if (statusFilter !== 'all') params.append('status', statusFilter)
 
-      const baseUrl = process.env.NEXT_PUBLIC_APP_URL || window.location.origin
+      // Gunakan base URL yang benar
+      const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 
+                     (typeof window !== 'undefined' ? window.location.origin : '')
+      
+      // Cek apakah baseUrl valid
+      if (!baseUrl) {
+        throw new Error('Base URL tidak ditemukan')
+      }
+
       const url = `${baseUrl}/api/contacts${params.toString() ? `?${params.toString()}` : ''}`
+      console.log('Fetching from URL:', url)
 
       const response = await fetch(url, {
         signal: signal || controller.signal,
         headers: {
           'Content-Type': 'application/json',
           'Cache-Control': 'no-cache'
-        }
+        },
+        credentials: 'include' // Include cookies jika diperlukan
       })
 
+      console.log('Response status:', response.status)
+
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
+        // Coba parse error message dari response
+        let errorMessage = `HTTP error! status: ${response.status}`
+        try {
+          const errorData = await response.json()
+          errorMessage = errorData.error || errorData.message || errorMessage
+        } catch {
+          // Jika response bukan JSON
+          if (response.status === 404) {
+            errorMessage = 'API endpoint tidak ditemukan. Periksa konfigurasi backend.'
+          } else if (response.status === 500) {
+            errorMessage = 'Server error. Silakan coba lagi nanti.'
+          }
+        }
+        throw new Error(errorMessage)
       }
 
-      const data = await response.json()
+      const data: ApiResponse = await response.json()
+      console.log('API Response data:', data)
 
       // Validasi data
       if (data && Array.isArray(data.contacts)) {
@@ -167,9 +206,17 @@ export default function ContactsPage() {
           typeof contact.phone === 'string'
         )
         setContacts(validContacts)
+        console.log('Valid contacts loaded:', validContacts.length)
+      } else if (data.error) {
+        throw new Error(data.error)
       } else {
-        setContacts([])
         console.warn('Invalid data structure from API:', data)
+        setContacts([])
+        toast({
+          title: 'Info',
+          description: 'Data kontak kosong atau format tidak sesuai',
+          variant: 'default',
+        })
       }
 
     } catch (error: any) {
@@ -179,12 +226,21 @@ export default function ContactsPage() {
       }
       
       console.error('Error fetching contacts:', error)
-      setError('Gagal memuat kontak. Silakan coba lagi.')
+      
+      // Tentukan pesan error yang user-friendly
+      let userMessage = 'Gagal memuat kontak. Silakan coba lagi.'
+      if (error.message.includes('NetworkError') || error.message.includes('Failed to fetch')) {
+        userMessage = 'Koneksi jaringan bermasalah. Periksa koneksi internet Anda.'
+      } else if (error.message.includes('404')) {
+        userMessage = 'Endpoint API tidak ditemukan. Hubungi administrator.'
+      }
+      
+      setError(userMessage)
       setContacts([])
       
       toast({
         title: 'Error',
-        description: 'Gagal memuat kontak',
+        description: userMessage,
         variant: 'destructive',
       })
     } finally {
@@ -261,12 +317,21 @@ export default function ContactsPage() {
         notes: formData.notes.trim() || null
       }
 
-      const baseUrl = process.env.NEXT_PUBLIC_APP_URL || window.location.origin
+      console.log('Saving payload:', payload)
+
+      const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 
+                     (typeof window !== 'undefined' ? window.location.origin : '')
+      
+      if (!baseUrl) {
+        throw new Error('Base URL tidak ditemukan')
+      }
+
       const url = editingContact
         ? `${baseUrl}/api/contacts/${editingContact.id}`
         : `${baseUrl}/api/contacts`
 
       const method = editingContact ? 'PUT' : 'POST'
+      console.log(`Sending ${method} request to:`, url)
 
       const response = await fetch(url, {
         method,
@@ -277,7 +342,13 @@ export default function ContactsPage() {
         body: JSON.stringify(payload)
       })
 
-      const data = await response.json()
+      console.log('Save response status:', response.status)
+
+      const data = await response.json().catch(() => ({
+        error: 'Gagal memparse response'
+      }))
+
+      console.log('Save response data:', data)
 
       if (response.ok) {
         toast({
@@ -288,15 +359,16 @@ export default function ContactsPage() {
         handleDialogClose()
         fetchContacts()
       } else {
-        throw new Error(data.error || data.message || 'Terjadi kesalahan')
+        throw new Error(data.error || data.message || `HTTP ${response.status}`)
       }
     } catch (error: any) {
       console.error('Save error:', error)
-      setError(error.message || 'Terjadi kesalahan jaringan')
+      const errorMessage = error.message || 'Terjadi kesalahan jaringan'
+      setError(errorMessage)
       
       toast({
         title: 'Error',
-        description: error.message || 'Terjadi kesalahan',
+        description: errorMessage,
         variant: 'destructive',
       })
     } finally {
@@ -309,7 +381,15 @@ export default function ContactsPage() {
       setDeletingId(id)
       setError(null)
 
-      const baseUrl = process.env.NEXT_PUBLIC_APP_URL || window.location.origin
+      const baseUrl = process.env.NEXT_PUBLIC_APP_URL || 
+                     (typeof window !== 'undefined' ? window.location.origin : '')
+      
+      if (!baseUrl) {
+        throw new Error('Base URL tidak ditemukan')
+      }
+
+      console.log('Deleting contact:', id, 'from:', `${baseUrl}/api/contacts/${id}`)
+
       const response = await fetch(`${baseUrl}/api/contacts/${id}`, {
         method: 'DELETE',
         headers: {
@@ -317,9 +397,11 @@ export default function ContactsPage() {
         }
       })
 
+      console.log('Delete response status:', response.status)
+
       if (!response.ok) {
         const data = await response.json().catch(() => ({}))
-        throw new Error(data.error || data.message || 'Gagal menghapus kontak')
+        throw new Error(data.error || data.message || `HTTP ${response.status}`)
       }
 
       toast({
@@ -330,11 +412,12 @@ export default function ContactsPage() {
       fetchContacts()
     } catch (error: any) {
       console.error('Delete error:', error)
-      setError(error.message || 'Terjadi kesalahan')
+      const errorMessage = error.message || 'Gagal menghapus kontak'
+      setError(errorMessage)
       
       toast({
         title: 'Error',
-        description: error.message || 'Gagal menghapus kontak',
+        description: errorMessage,
         variant: 'destructive',
       })
     } finally {
@@ -400,7 +483,7 @@ export default function ContactsPage() {
     // Format: 62-812-3456-7890
     const clean = phone.replace(/\D/g, '')
     if (clean.startsWith('62')) {
-      return clean.replace(/(\d{2})(\d{3})(\d{4})(\d{4})/, '$1-$2-$3-$4')
+      return clean.replace(/(\d{2})(\d{3})(\d{4})(\d{0,4})/, '$1-$2-$3-$4')
     }
     return phone
   }
@@ -430,6 +513,35 @@ export default function ContactsPage() {
       description: 'Fitur export akan segera tersedia',
     })
   }
+
+  const handleRetry = () => {
+    fetchContacts()
+  }
+
+  // Test API endpoint
+  const testApiEndpoint = async () => {
+    try {
+      const baseUrl = process.env.NEXT_PUBLIC_APP_URL || window.location.origin
+      const response = await fetch(`${baseUrl}/api/contacts`, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' }
+      })
+      console.log('API Test Response:', {
+        status: response.status,
+        ok: response.ok,
+        url: `${baseUrl}/api/contacts`
+      })
+    } catch (error) {
+      console.error('API Test Error:', error)
+    }
+  }
+
+  // Coba test API saat komponen mount
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      testApiEndpoint()
+    }
+  }, [])
 
   return (
     <div className="space-y-6">
@@ -616,22 +728,67 @@ export default function ContactsPage() {
         </div>
       </div>
 
+      {/* Debug Info - Hanya tampilkan di development */}
+      {process.env.NODE_ENV === 'development' && (
+        <div className="p-4 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-yellow-800 dark:text-yellow-200">
+                <strong>Debug Info:</strong> Base URL: {process.env.NEXT_PUBLIC_APP_URL || window.location.origin}
+              </p>
+              <Button 
+                size="sm" 
+                variant="outline" 
+                onClick={testApiEndpoint}
+                className="mt-2"
+              >
+                Test API Endpoint
+              </Button>
+            </div>
+            <Button 
+              size="sm" 
+              variant="outline" 
+              onClick={() => {
+                console.log('Contacts:', contacts)
+                console.log('Loading:', loading)
+                console.log('Error:', error)
+              }}
+            >
+              Log State
+            </Button>
+          </div>
+        </div>
+      )}
+
       {/* Error Alert */}
       {error && !loading && (
         <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2 text-red-800 dark:text-red-200">
-              <AlertCircle className="w-5 h-5" />
-              <span>{error}</span>
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-2 text-red-800 dark:text-red-200">
+              <AlertCircle className="w-5 h-5 mt-0.5 flex-shrink-0" />
+              <div>
+                <span className="font-medium">Error:</span>
+                <span className="ml-2">{error}</span>
+              </div>
             </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => fetchContacts()}
-              className="text-red-600 hover:text-red-700 hover:bg-red-100"
-            >
-              <RefreshCw className="w-4 h-4" />
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRetry}
+                className="text-red-600 hover:text-red-700 hover:bg-red-100"
+              >
+                <RefreshCw className="w-4 h-4 mr-2" />
+                Coba Lagi
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => window.location.reload()}
+              >
+                Refresh Halaman
+              </Button>
+            </div>
           </div>
         </div>
       )}
@@ -683,7 +840,12 @@ export default function ContactsPage() {
       {/* Contacts List */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle>Daftar Kontak ({filteredContacts.length})</CardTitle>
+          <div>
+            <CardTitle>Daftar Kontak</CardTitle>
+            <CardDescription>
+              {loading ? 'Memuat...' : `${filteredContacts.length} kontak ditemukan`}
+            </CardDescription>
+          </div>
           {loading && (
             <Loader2 className="w-4 h-4 animate-spin text-gray-500" />
           )}
@@ -691,25 +853,34 @@ export default function ContactsPage() {
         <CardContent>
           {loading && initialLoad ? (
             <div className="text-center py-12 space-y-4">
-              <Loader2 className="w-8 h-8 animate-spin text-gray-400 mx-auto" />
+              <Loader2 className="w-8 h-8 animate-spin text-green-600 mx-auto" />
               <p className="text-gray-500">Memuat kontak...</p>
             </div>
           ) : error ? (
             <div className="text-center py-12">
-              <AlertCircle className="w-12 h-12 text-red-400 mx-auto mb-4" />
+              <Users className="w-12 h-12 text-gray-400 mx-auto mb-4" />
               <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">
-                Gagal memuat kontak
+                Tidak dapat memuat kontak
               </h3>
               <p className="text-gray-600 dark:text-gray-400 mb-4">
                 {error}
               </p>
-              <Button
-                variant="outline"
-                onClick={() => fetchContacts()}
-              >
-                <RefreshCw className="w-4 h-4 mr-2" />
-                Coba Lagi
-              </Button>
+              <div className="flex gap-3 justify-center">
+                <Button
+                  variant="outline"
+                  onClick={handleRetry}
+                >
+                  <RefreshCw className="w-4 h-4 mr-2" />
+                  Coba Lagi
+                </Button>
+                <Button
+                  className="bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700"
+                  onClick={() => setDialogOpen(true)}
+                >
+                  <Plus className="w-4 h-4 mr-2" />
+                  Tambah Kontak
+                </Button>
+              </div>
             </div>
           ) : filteredContacts.length === 0 ? (
             <div className="text-center py-12">
@@ -767,13 +938,15 @@ export default function ContactsPage() {
                           <Tag className="w-3 h-3 shrink-0" />
                           <div className="flex gap-1 flex-wrap">
                             {contact.tags.split(',').map((tag, index) => (
-                              <Badge 
-                                key={index} 
-                                variant="outline" 
-                                className="text-xs truncate max-w-[100px]"
-                              >
-                                {tag.trim()}
-                              </Badge>
+                              tag.trim() && (
+                                <Badge 
+                                  key={index} 
+                                  variant="outline" 
+                                  className="text-xs truncate max-w-[100px]"
+                                >
+                                  {tag.trim()}
+                                </Badge>
+                              )
                             ))}
                           </div>
                         </div>
